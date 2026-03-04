@@ -1,0 +1,172 @@
+# AgentFence Default Policy
+# =========================
+# This file defines the default safety policy for running AI agents locally.
+# Copy and customise it for your project.  Pass it to the CLI with:
+#
+#   agent_fence run --policy default_policy.yaml my_agent.py
+#
+# Or load it programmatically:
+#
+#   from agent_fence import load_policy, Sandbox
+#   policy = load_policy("default_policy.yaml")
+#   with Sandbox(policy):
+#       ...
+
+# ---------------------------------------------------------------------------
+# Global settings
+# ---------------------------------------------------------------------------
+
+# Human-readable name for this policy (used in audit log headers).
+name: "default"
+
+# Policy schema version – increment when the format changes.
+version: "1.0"
+
+# Enforcement mode applied when no per-category mode is set.
+# Options:
+#   block    – raise PolicyViolation / RateLimitExceeded (default)
+#   log_only – log the action and allow it through
+enforcement_mode: block
+
+# ---------------------------------------------------------------------------
+# Audit log settings
+# ---------------------------------------------------------------------------
+audit_log:
+  # Enable or disable audit logging globally.
+  enabled: true
+
+  # Path to the audit log file.  Use "-" to write to stdout.
+  path: "agent_fence_audit.jsonl"
+
+  # Minimum log level recorded (debug | info | warning | error).
+  level: info
+
+  # Include the call-stack frame of the intercepted action.
+  include_stack_frame: true
+
+# ---------------------------------------------------------------------------
+# Filesystem access
+# ---------------------------------------------------------------------------
+filesystem:
+  # Whether filesystem operations are intercepted at all.
+  enabled: true
+
+  # Override global enforcement_mode for this category.
+  # enforcement_mode: log_only
+
+  # Operations that are completely blocked regardless of whitelists.
+  blocked_operations:
+    - os.remove
+    - os.unlink
+    - os.rmdir
+    - shutil.rmtree
+    - shutil.move    # also affects cross-device moves acting as delete+copy
+
+  # Operations that are allowed without further restriction.
+  allowed_operations:
+    - os.listdir
+    - os.stat
+    - os.path.exists
+    - os.getcwd
+
+  # Glob patterns for paths that agents MAY read.
+  read_whitelist:
+    - "/tmp/**"
+    - "./data/**"
+    - "./outputs/**"
+
+  # Glob patterns for paths that agents MAY write to.
+  write_whitelist:
+    - "/tmp/**"
+    - "./outputs/**"
+
+  # If true, agents may only access paths that match a whitelist entry.
+  # If false, whitelists are advisory and only explicitly blocked paths
+  # are stopped.
+  strict_whitelist: false
+
+# ---------------------------------------------------------------------------
+# Network access
+# ---------------------------------------------------------------------------
+network:
+  enabled: true
+
+  # Override global enforcement_mode for this category.
+  # enforcement_mode: log_only
+
+  # Comma-separated list of domains/IP ranges agents are allowed to contact.
+  # Supports wildcard subdomains: "*.openai.com"
+  domain_whitelist:
+    - "api.openai.com"
+    - "api.anthropic.com"
+    - "*.huggingface.co"
+    - "localhost"
+    - "127.0.0.1"
+
+  # Block all requests to private/loopback ranges except those explicitly
+  # listed in domain_whitelist.
+  block_private_ranges: false
+
+  # HTTP methods that are allowed.  Use ["*"] to allow all.
+  allowed_methods:
+    - GET
+    - POST
+
+  # Rate limit: maximum number of outbound HTTP calls per minute.
+  rate_limit:
+    calls: 60
+    window_seconds: 60
+
+# ---------------------------------------------------------------------------
+# Subprocess / shell execution
+# ---------------------------------------------------------------------------
+subprocess:
+  enabled: true
+
+  # enforcement_mode: block
+
+  # Executables that agents are allowed to run.  Empty list = deny all.
+  command_whitelist: []
+
+  # Block all shell=True invocations unconditionally.
+  block_shell: true
+
+  # Rate limit: maximum subprocess spawns per minute.
+  rate_limit:
+    calls: 5
+    window_seconds: 60
+
+# ---------------------------------------------------------------------------
+# Environment variable access
+# ---------------------------------------------------------------------------
+env:
+  enabled: true
+
+  # enforcement_mode: log_only
+
+  # Environment variables agents are allowed to read.
+  read_whitelist:
+    - PATH
+    - HOME
+    - USER
+    - LANG
+    - TZ
+    - TMPDIR
+    - VIRTUAL_ENV
+    - CONDA_DEFAULT_ENV
+
+  # Environment variables that agents may NEVER read (takes precedence
+  # over read_whitelist).
+  read_blocklist:
+    - AWS_ACCESS_KEY_ID
+    - AWS_SECRET_ACCESS_KEY
+    - AWS_SESSION_TOKEN
+    - OPENAI_API_KEY
+    - ANTHROPIC_API_KEY
+    - GOOGLE_API_KEY
+    - DATABASE_URL
+    - SECRET_KEY
+    - PRIVATE_KEY
+
+  # Whether agents may set/modify environment variables.
+  allow_write: false
