@@ -85,6 +85,36 @@ except RateLimitExceeded as exc:
     print(f"Agent exceeded rate limit: {exc}")
 ```
 
+### 5. Build a policy programmatically
+
+```python
+from agent_fence import Sandbox, policy_from_dict
+
+policy = policy_from_dict({
+    "name": "my-inline-policy",
+    "enforcement_mode": "block",
+    "filesystem": {
+        "blocked_operations": ["os.remove", "shutil.rmtree"],
+        "strict_whitelist": False,
+    },
+    "network": {
+        "domain_whitelist": ["api.openai.com"],
+        "rate_limit": {"calls": 30, "window_seconds": 60},
+    },
+    "subprocess": {
+        "command_whitelist": [],  # deny all
+        "block_shell": True,
+    },
+    "env": {
+        "read_blocklist": ["OPENAI_API_KEY", "AWS_SECRET_ACCESS_KEY"],
+        "allow_write": False,
+    },
+})
+
+with Sandbox(policy):
+    ...
+```
+
 ---
 
 ## Policy YAML Reference
@@ -107,6 +137,7 @@ audit_log:
 
 filesystem:
   enabled: true
+  enforcement_mode: block           # overrides global; optional
   blocked_operations:
     - os.remove
     - os.unlink
@@ -120,10 +151,11 @@ filesystem:
   write_whitelist:
     - "/tmp/**"
     - "./outputs/**"
-  strict_whitelist: false
+  strict_whitelist: false           # true = deny all paths not in whitelist
 
 network:
   enabled: true
+  enforcement_mode: block           # optional override
   domain_whitelist:
     - "api.openai.com"
     - "*.huggingface.co"
@@ -135,7 +167,7 @@ network:
 
 subprocess:
   enabled: true
-  command_whitelist: []      # Empty = deny all subprocess calls
+  command_whitelist: []             # Empty = deny all subprocess calls
   block_shell: true
   rate_limit:
     calls: 5
@@ -156,22 +188,59 @@ env:
 
 ## CLI Reference
 
+### `agent_fence run`
+
 ```
 Usage: agent_fence run [OPTIONS] SCRIPT [SCRIPT_ARGS]...
 
   Run SCRIPT inside an AgentFence sandbox using the specified policy.
 
 Options:
-  --policy PATH   Path to a YAML policy file.  [required]
-  --log    PATH   Override the audit log output path.
-  --mode   TEXT   Override enforcement mode: block | log_only.
-  --help          Show this message and exit.
+  -p, --policy PATH     Path to a YAML policy file.  Uses built-in defaults
+                        if omitted.
+  -l, --log PATH        Override the audit log output path from the policy.
+                        Use '-' for stdout.
+  -m, --mode [block|log_only]
+                        Override global enforcement mode.
+  -v, --verbose         Enable verbose output (DEBUG logging).
+  --version             Show the version and exit.
+  --help                Show this message and exit.
+```
+
+**Examples:**
+
+```bash
+# Run with a policy file
+agent_fence run --policy my_policy.yaml agent.py
+
+# Override enforcement mode to log-only for debugging
+agent_fence run --policy my_policy.yaml --mode log_only agent.py
+
+# Write audit log to stdout
+agent_fence run --policy my_policy.yaml --log - agent.py
+
+# Pass arguments to the agent script
+agent_fence run --policy my_policy.yaml agent.py -- --api-key test --verbose
+
+# Verbose sandbox output
+agent_fence run --policy my_policy.yaml --verbose agent.py
+```
+
+### `agent_fence show-policy`
+
+```
+Usage: agent_fence show-policy [POLICY]
+
+  Display the resolved policy settings.
+
+  POLICY is an optional path to a YAML policy file.
+  If omitted, the built-in default policy is shown.
 ```
 
 **Example:**
 
 ```bash
-agent_fence run --policy my_policy.yaml --mode log_only agent.py --agent-arg value
+agent_fence show-policy my_policy.yaml
 ```
 
 ---
@@ -182,7 +251,7 @@ Each line of the audit log is a JSON object:
 
 ```json
 {
-  "timestamp": "2024-01-15T12:34:56.789012Z",
+  "timestamp": "2024-01-15T12:34:56.789012+00:00",
   "policy": "my-agent-policy",
   "action": "network",
   "operation": "requests.get",
@@ -200,6 +269,15 @@ Each line of the audit log is a JSON object:
 
 `decision` is either `"allow"` or `"block"`.
 
+### Intercepted Operations
+
+| Category | Operations Intercepted |
+|----------|------------------------|
+| **filesystem** | `os.remove`, `os.unlink`, `os.rmdir`, `os.makedirs`, `os.mkdir`, `os.rename`, `os.replace`, `os.listdir`, `os.scandir`, `os.stat`, `os.lstat`, `os.access`, `os.getcwd`, `os.walk`, `os.path.exists`, `os.path.isfile`, `os.path.isdir`, `os.path.getsize`, `shutil.rmtree`, `shutil.move`, `shutil.copy`, `shutil.copy2`, `shutil.copyfile`, `shutil.copytree` |
+| **network** | `urllib.request.urlopen`, `urllib.request.urlretrieve`, `requests.get/post/put/delete/patch/head/options/request` |
+| **subprocess** | `subprocess.run`, `subprocess.call`, `subprocess.check_call`, `subprocess.check_output`, `subprocess.Popen` |
+| **env** | `os.getenv`, `os.putenv`, `os.unsetenv`, `os.environ.__getitem__`, `os.environ.get`, `os.environ.__setitem__`, `os.environ.__delitem__`, `os.environ.update`, `os.environ.pop` |
+
 ---
 
 ## Architecture
@@ -216,6 +294,58 @@ agent_fence/
 └── cli.py             # Click CLI entrypoint
 ```
 
+### How It Works
+
+1. **Policy loading** – `load_policy("policy.yaml")` reads and validates your YAML config into a `Policy` dataclass with full defaults.
+2. **Sandbox activation** – `Sandbox.__enter__()` opens the audit logger, initialises the rate limiter, and monkey-patches all configured stdlib functions.
+3. **Interception** – Each patched function checks the policy: is the operation blocked? Is the path/domain/command whitelisted? Has the rate limit been hit?
+4. **Decision** – In `block` mode, policy violations raise `PolicyViolation` or `RateLimitExceeded`. In `log_only` mode, the action is logged and allowed through.
+5. **Audit** – Every intercepted call (allowed or blocked) is written as a JSON Lines entry to the configured log destination.
+6. **Teardown** – `Sandbox.__exit__()` restores all original functions and closes the audit log.
+
+---
+
+## Enforcement Modes
+
+| Mode | Behaviour |
+|------|----------|
+| `block` | Raise `PolicyViolation` or `RateLimitExceeded` when policy is violated. **Default.** |
+| `log_only` | Log the violation as a `block` decision but allow the call through. Useful for policy development. |
+
+Modes can be set globally or overridden per category:
+
+```yaml
+enforcement_mode: block       # global default
+
+filesystem:
+  enforcement_mode: log_only  # filesystem violations are logged but allowed
+
+network:
+  enforcement_mode: block     # network violations raise exceptions
+```
+
+---
+
+## Rate Limiting
+
+AgentFence uses a **token-bucket** algorithm. Each category starts with a full
+bucket of `calls` tokens. Each intercepted call consumes one token. Tokens
+refill continuously at a rate of `calls / window_seconds` per second.
+
+```yaml
+network:
+  rate_limit:
+    calls: 10          # max 10 calls
+    window_seconds: 60 # per 60-second window
+
+subprocess:
+  rate_limit:
+    calls: 3
+    window_seconds: 60
+```
+
+When the bucket is empty, `RateLimitExceeded` is raised (in `block` mode).
+
 ---
 
 ## Development
@@ -227,6 +357,22 @@ pip install pytest
 
 # Run the test suite
 pytest
+
+# Run with verbose output
+pytest -v
+
+# Run a specific test file
+pytest tests/test_sandbox.py -v
+```
+
+### Running the Example
+
+```bash
+# Use the bundled default policy
+agent_fence run --policy default_policy.yaml --mode log_only examples/my_agent.py
+
+# Show what the default policy resolves to
+agent_fence show-policy default_policy.yaml
 ```
 
 ---
